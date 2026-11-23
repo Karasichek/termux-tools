@@ -1,0 +1,76 @@
+#!/data/data/com.termux/files/usr/bin/python3
+# runsv service: keep Termux:X11's knock port (TCP 7892) open so opening the
+# Termux:X11 app (or any client sending "0xDEADBEEF") starts X11+XFCE on demand.
+import os
+import socket
+import subprocess
+import time
+
+PORT = 7892
+MAGIC = b"0xDEADBEEF"
+X_PROC = r"^termux-x11 "
+PGREP = "/data/data/com.termux/files/usr/bin/pgrep"
+
+
+def is_knock(data):
+    return data.startswith(MAGIC)
+
+
+def x_running():
+    return subprocess.run(
+        [PGREP, "-f", X_PROC], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    ).returncode == 0
+
+
+def make_listener(port=PORT):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    s.bind(("0.0.0.0", port))
+    s.listen(5)
+    s.settimeout(1)
+    return s
+
+
+def main():
+    env = dict(os.environ)
+    env["HOME"] = "/data/data/com.termux/files/home"
+    env["PATH"] = env["HOME"] + "/usr/scripts:/data/data/com.termux/files/usr/bin:/system/bin"
+
+    while True:
+        while x_running():
+            time.sleep(2)
+        s = make_listener()
+        try:
+            while True:
+                try:
+                    c, _ = s.accept()
+                except socket.timeout:
+                    if x_running():
+                        break
+                    continue
+                c.settimeout(0.2)
+                try:
+                    data = c.recv(512)
+                except OSError:
+                    data = b""
+                c.close()
+                if is_knock(data) and not x_running():
+                    s.close()
+                    p = subprocess.Popen(
+                        ["tx11start"],
+                        env=env,
+                        stdin=subprocess.DEVNULL,
+                        start_new_session=True,
+                    )
+                    try:
+                        p.wait(timeout=60)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    break
+        finally:
+            s.close()
+
+
+if __name__ == "__main__":
+    main()

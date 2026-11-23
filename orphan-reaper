@@ -1,0 +1,41 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Reap leaked processes: kill parents hoarding zombies and idle orphan helpers.
+# shortcut: heuristics only (zero CPU, age, known args), not a general reaper.
+set -u
+ZOMBIE_PARENT_MIN=${ZOMBIE_PARENT_MIN:-20}
+ORPHAN_MIN_AGE=${ORPHAN_MIN_AGE:-120}
+
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*"; }
+
+reap() {
+    ps -eo pid=,ppid=,stat= | awk '$3 ~ /Z/ && $2 > 1 {print $2}' |
+        sort | uniq -c | while read -r count ppid; do
+            [ "$count" -ge "$ZOMBIE_PARENT_MIN" ] || continue
+            log "zombies: killing parent $ppid ($count defunct)"
+            kill -9 "$ppid" 2>/dev/null
+        done
+
+    ps -eo pid=,ppid=,stat=,etimes=,time=,args= |
+        while read -r pid ppid stat etimes cputime args; do
+            [ "$ppid" = 1 ] || continue
+            [ "$cputime" = "00:00:00" ] || continue
+            [ "$etimes" -ge "$ORPHAN_MIN_AGE" ] 2>/dev/null || continue
+            case "$args" in
+                *termux-api*BatteryStatus*) ;;
+                */sh | sh | */sh\ *) ;;
+                sleep | sleep\ * | */sleep | */sleep\ *) ;;
+                *) continue ;;
+            esac
+            log "orphan: killing $pid (${etimes}s idle) $args"
+            kill -9 "$pid" 2>/dev/null
+        done
+}
+
+if [ "${1:-}" = --once ]; then
+    reap
+    exit 0
+fi
+while :; do
+    reap
+    sleep 60
+done
